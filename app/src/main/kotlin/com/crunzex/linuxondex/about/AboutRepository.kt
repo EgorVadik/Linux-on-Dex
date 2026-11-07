@@ -101,15 +101,9 @@ class AboutRepository(private val context: Context) {
      * an update it could not confirm.
      */
     suspend fun checkForUpdate(): UpdateStatus {
-        val body = readText(LATEST_RELEASE_URL) ?: return UpdateStatus.Latest
-        val release = runCatching { json.decodeFromString<GithubRelease>(body) }
-            .onFailure { AppLog.warn(SCOPE, "release feed was not readable", it) }
-            .getOrNull()
-            ?: return UpdateStatus.Latest
-        // Drafts and pre-releases are not offered: they are not what a user
-        // tapping "Update" expects to install.
-        if (release.draft || release.prerelease) return UpdateStatus.Latest
-        return decideUpdateStatus(installedVersion(), release.tagName, release.htmlUrl)
+        // A separately signed private fork must never offer upstream APKs
+        // as updates. Updates to this build are installed explicitly.
+        return UpdateStatus.Latest
     }
 
     // ---- Networking --------------------------------------------------------

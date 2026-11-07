@@ -59,6 +59,7 @@ fun DisplayScreen(
     /** Null in the two-pane layout, where the menu stays visible beside us. */
     onBack: (() -> Unit)?,
     onOpenInNewWindow: (() -> Unit)? = null,
+    vncSocketPath: String? = null,
 ) {
     var statusText by remember { mutableStateOf("Connecting…") }
     var vncView by remember { mutableStateOf<VncView?>(null) }
@@ -137,6 +138,7 @@ fun DisplayScreen(
                         connectVnc(
                             view = view,
                             port = vncPort,
+                            unixSocketPath = vncSocketPath,
                             scope = connectionScope,
                             connectionOwner = connectionOwner,
                             onStatus = { message -> statusText = message },
@@ -182,6 +184,7 @@ fun connectVnc(
     connectionOwner: ActiveConnectionOwner<RfbClient>,
     onStatus: (String) -> Unit,
     onFirstFrame: () -> Unit,
+    unixSocketPath: String? = null,
 ) {
     scope.launch {
         while (isActive) {
@@ -191,6 +194,7 @@ fun connectVnc(
                 val newClient = RfbClient(
                 host = "127.0.0.1",
                 port = port,
+                unixSocketPath = unixSocketPath,
                 listener = object : RfbClient.Listener {
                     private var resolution = ""
 

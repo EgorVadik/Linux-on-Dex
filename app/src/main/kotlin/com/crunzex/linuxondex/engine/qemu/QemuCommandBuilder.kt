@@ -311,8 +311,9 @@ object QemuCommandBuilder {
         }
         return listOf(
             "-device", adapterArgument,
-            // Local-only VNC server; never bound to a routable address.
-            "-vnc", "127.0.0.1:${display.vncDisplayNumber}",
+            // Android apps share loopback. A filesystem socket under our
+            // private files directory is protected by the app sandbox.
+            "-vnc", "unix:${File(plan.qmpSocketFile.parentFile, "${plan.config.id}-vnc.sock").absolutePath}",
             "-display", "none",
         )
     }

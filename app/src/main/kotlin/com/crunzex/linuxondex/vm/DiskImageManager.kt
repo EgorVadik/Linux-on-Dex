@@ -30,7 +30,25 @@ class DiskImageManager(private val paths: VmPaths) {
      * A ready-made image is already a disk, so nothing is created for it.
      */
     fun ensureRootDisk(config: VmConfig) {
-        if (config.usesPreparedImage) return
+        if (config.usesPreparedImage) {
+            val disk = bootDiskFile(config)
+            val info = NativeCommand(
+                paths.qemuImgBinary, listOf("info", "--output=json", disk.absolutePath),
+                paths.processEnvironment(),
+            ).runAndCaptureOutput().requireSuccess("inspect guest disk")
+            val currentSize = Regex("\"virtual-size\"\\s*:\\s*(\\d+)")
+                .find(info.output)?.groupValues?.get(1)?.toLongOrNull()
+                ?: throw LxdError.StorageFailed("cannot determine guest disk capacity")
+            val desiredSize = config.storage.diskSizeGb.toLong() shl 30
+            if (currentSize < desiredSize) {
+                NativeCommand(
+                    paths.qemuImgBinary,
+                    listOf("resize", disk.absolutePath, "${config.storage.diskSizeGb}G"),
+                    paths.processEnvironment(),
+                ).runAndCaptureOutput().requireSuccess("grow guest disk")
+            }
+            return
+        }
         val diskFile = rootDiskFile(config.id)
         if (diskFile.exists()) return
         diskFile.parentFile?.mkdirs()

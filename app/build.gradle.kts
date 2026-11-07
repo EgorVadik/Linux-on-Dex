@@ -10,15 +10,15 @@ android {
     compileSdk = 36
 
     defaultConfig {
-        applicationId = "com.crunzex.linuxondex"
+        applicationId = "com.crunzex.linuxondex.privatebuild"
         // Android 13 (Tiramisu) through Android 16 — the supported window
         // for current Samsung Galaxy S Ultra firmware.
         minSdk = 33
         targetSdk = 36
         // versionCode keeps counting from the 0.x/2.x builds so devices that
         // already have the app update in place — Android forbids downgrading it.
-        versionCode = 39
-        versionName = "1.2.0"
+        versionCode = 3
+        versionName = "1.3.0-private.3"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -35,27 +35,18 @@ android {
             // extracted to <nativeLibraryDir> on install: that is the only
             // location a modern-targetSdk app is allowed to exec() from.
             useLegacyPackaging = true
-        }
-    }
-
-    signingConfigs {
-        create("release") {
-            // Development signing key, committed so anyone can produce an
-            // installable build. Replace it before publishing anywhere.
-            storeFile = rootProject.file(
-                providers.gradleProperty("lxdKeystoreFile")
-                    .getOrElse("keystore/crunzex-release.jks")
-            )
-            storePassword = providers.gradleProperty("lxdKeystorePassword")
-                .getOrElse("crunzex")
-            keyAlias = providers.gradleProperty("lxdKeyAlias").getOrElse("crunzex")
-            keyPassword = providers.gradleProperty("lxdKeyPassword").getOrElse("crunzex")
+            keepDebugSymbols += "**/*.so"
         }
     }
 
     buildTypes {
+        debug {
+            // Installs beside the signed private build, so the emulator and
+            // phone can keep both while a change is being tested.
+            applicationIdSuffix = ".dev"
+            versionNameSuffix = "-dev"
+        }
         release {
-            signingConfig = signingConfigs.getByName("release")
             // Shrinking is off: the payload dominates APK size, and keeping
             // stack traces readable matters more for an alpha build.
             isMinifyEnabled = false

@@ -31,6 +31,7 @@ class DisplayActivity : ComponentActivity() {
                 val vmState by container.vmController.vmState.collectAsStateWithLifecycle()
                 DisplayScreen(
                     vncPort = (vmState as? VmState.Running)?.vncPort,
+                    vncSocketPath = (vmState as? VmState.Running)?.vncSocketPath,
                     onBack = { finish() },
                 )
             }

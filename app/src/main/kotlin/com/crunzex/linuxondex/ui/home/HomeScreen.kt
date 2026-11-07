@@ -261,8 +261,15 @@ private fun VmStatusCard(uiState: MainUiState) {
             )
             uiState.config?.let { config ->
                 Text(
-                    text = "${config.cpu.coreCount} vCPU · ${config.memoryMb} MB · " +
-                        "${config.storage.diskSizeGb} GB · ${config.display.resolution.displayName}",
+                    // A container has no fixed CPU, memory or disk reservation:
+                    // it uses what its programs use. Showing the VM settings
+                    // there suggested gigabytes were being held.
+                    text = if (config.runsInProotContainer) {
+                        "Native container · memory used on demand · no reserved RAM"
+                    } else {
+                        "${config.cpu.coreCount} vCPU · ${config.memoryMb} MB · " +
+                            "${config.storage.diskSizeGb} GB · ${config.display.resolution.displayName}"
+                    },
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(top = 2.dp),
@@ -307,12 +314,12 @@ private fun QuickStartCard(uiState: MainUiState, onOpenSetup: () -> Unit) {
             RowDivider()
             ListRow(
                 title = "Sign in",
-                // A container has a single user and no login prompt; the
-                // credentials only matter for its SSH server.
+                // A console container has a single user, no login prompt and
+                // no network services: the terminal opens straight into it.
                 subtitle = if (isContainer) {
-                    "Password: ${prepared.password} · for SSH on port 8022"
+                    "No password · open Terminal · no SSH or VNC services"
                 } else {
-                    "Password: ${prepared.password} · passwordless sudo"
+                    "Private local console · SSH password login disabled on fresh images"
                 },
                 value = if (isContainer) "root" else prepared.username,
                 valueColor = MaterialTheme.colorScheme.primary,
@@ -475,9 +482,9 @@ private fun describePreparedImageReadiness(
     isRootfsExtracted: Boolean,
 ): String = when {
     prepared.format == PreparedImageFormat.PROOT_ROOTFS && isRootfsExtracted ->
-        "Ready — starts straight to the desktop"
+        "Ready — starts in about a second"
     prepared.format == PreparedImageFormat.PROOT_ROOTFS ->
-        "First start unpacks the desktop once (a few minutes)"
+        "First start unpacks the container once (about a minute)"
     prepared.firstBootCompleted -> "Configured — starts straight to a login prompt"
     else -> "First start runs a one-time setup"
 }

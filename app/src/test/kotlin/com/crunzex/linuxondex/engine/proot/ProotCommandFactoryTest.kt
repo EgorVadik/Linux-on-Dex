@@ -200,4 +200,59 @@ class ProotCommandFactoryTest {
             command.environment["DEX_VNC_PORT"],
         )
     }
+
+    @Test
+    fun `console shells take the seccomp fast path and a resizable pty when asked`() {
+        val command = ProotCommandFactory.interactiveShell(
+            paths, rootfsDir, null, fastSyscalls = true, resizablePty = true,
+        )
+
+        assertNull(command.environment["PROOT_NO_SECCOMP"])
+        val guestProgram = command.arguments.dropWhile { it != "/root" }.drop(1)
+        assertEquals(ProotCommandFactory.RESIZABLE_PTY_GUEST_PATH, guestProgram.first())
+        assertEquals(ProotCommandFactory.INTERACTIVE_LOGIN_COMMAND, guestProgram.last())
+    }
+
+    @Test
+    fun `console session leader and stop hook share the fast path`() {
+        assertNull(
+            ProotCommandFactory.consoleSession(paths, rootfsDir, null, fastSyscalls = true)
+                .environment["PROOT_NO_SECCOMP"],
+        )
+        val hook = ProotCommandFactory.sessionStopHook(paths, rootfsDir, fastSyscalls = true)
+        assertEquals(ProotCommandFactory.SESSION_STOP_HOOK_GUEST_PATH, hook.arguments.last())
+        assertNull(hook.environment["PROOT_NO_SECCOMP"])
+    }
+
+    @Test
+    fun `guest sockets get a short host directory`() {
+        val arguments = ProotCommandFactory.consoleSession(paths, rootfsDir, null).arguments
+        val bind = arguments.zipWithNext().single { (flag, value) ->
+            flag == "-b" && value.endsWith(":${ProotCommandFactory.SOCKET_DIR_GUEST_PATH}")
+        }.second
+        val hostSocket = bind.substringBefore(':') + "/qga"
+        assertTrue("host socket path must fit sun_path: $hostSocket", hostSocket.length < 80)
+    }
+
+    @Test
+    fun `resize request is an APC string dex-pty recognises`() {
+        assertEquals(
+            "\u001b_dexwinsz;120;40\u001b\\",
+            String(ProotCommandFactory.resizeSequence(120, 40), Charsets.US_ASCII),
+        )
+    }
+
+    @Test
+    fun `a persistent home is bound over root before the shared folder`() {
+        val home = File("/data/user/0/app/files/vm/proot-homes/devbox")
+        val shared = File("/sdcard/Android/data/app/files/shared")
+        val arguments = ProotCommandFactory.interactiveShell(
+            paths, rootfsDir, shared, fastSyscalls = true, resizablePty = true, homeDir = home,
+        ).arguments
+        val binds = arguments.zipWithNext().filter { (flag, _) -> flag == "-b" }.map { it.second }
+        val homeBind = binds.indexOf("${home.absolutePath}:/root")
+        val sharedBind = binds.indexOf("${shared.absolutePath}:${ProotCommandFactory.SHARED_FOLDER_GUEST_PATH}")
+        assertTrue("home must be bound: $binds", homeBind >= 0)
+        assertTrue("~/shared nests inside the home, so it is bound after it", sharedBind > homeBind)
+    }
 }

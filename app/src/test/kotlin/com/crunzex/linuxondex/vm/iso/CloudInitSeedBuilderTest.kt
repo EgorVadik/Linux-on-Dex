@@ -14,6 +14,15 @@ class CloudInitSeedBuilderTest {
     private val userData = CloudInitSeedBuilder.renderUserData("dex", "dex")
 
     @Test
+    fun `fresh guest has no shared SSH password and retains security updates`() {
+        assertTrue(userData.contains("lock_passwd: true"))
+        assertTrue(userData.contains("ssh_pwauth: false"))
+        assertFalse(userData.contains("plain_text_passwd:"))
+        assertFalse(userData.contains("disable --now unattended-upgrades"))
+        assertFalse(userData.contains("disable --now apt-daily"))
+    }
+
+    @Test
     fun `configures public dns resolvers because android has no resolv conf`() {
         assertTrue(userData.contains("/etc/systemd/resolved.conf.d/50-linux-on-dex-dns.conf"))
         assertTrue(userData.contains("DNS=1.1.1.1 8.8.8.8"))

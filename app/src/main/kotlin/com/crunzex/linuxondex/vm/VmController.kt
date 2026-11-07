@@ -281,8 +281,9 @@ class VmController(
             qemuEngine(QemuAccelerator.KVM)
         EngineKind.QEMU_TCG ->
             qemuEngine(QemuAccelerator.TCG)
-        EngineKind.PROOT ->
-            ProotEngine(paths, payloadInstaller)
+        // Console containers only: ProotEngine refuses desktop images, whose
+        // supervisors publish unauthenticated VNC/SSH services.
+        EngineKind.PROOT -> ProotEngine(paths, payloadInstaller, consoleOnly = true)
     }
 
     private fun qemuEngine(accelerator: QemuAccelerator): QemuVmEngine =

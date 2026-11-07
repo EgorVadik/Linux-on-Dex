@@ -26,6 +26,7 @@ sealed class VmState {
         val engine: EngineKind,
         val vncPort: Int?,
         val startedAtMillis: Long,
+        val vncSocketPath: String? = null,
     ) : VmState()
 
     data object Stopping : VmState()

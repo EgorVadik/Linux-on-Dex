@@ -60,4 +60,14 @@ interface SerialConsoleConnection : AutoCloseable {
 
     /** Sends user keystrokes to the guest. */
     fun write(data: ByteArray)
+
+    /**
+     * True when [resize] really changes the guest terminal's size (a real
+     * pty on the other end), so it is safe to call on every layout change.
+     * Serial consoles cannot: for them, size changes are keystrokes.
+     */
+    val supportsResize: Boolean get() = false
+
+    /** Tells the guest the terminal is now [columns]×[rows]. */
+    fun resize(columns: Int, rows: Int) = Unit
 }

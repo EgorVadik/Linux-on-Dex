@@ -67,25 +67,27 @@ class DiskAndNetworkTuningTest {
     }
 
     @Test
-    fun `maximum speed stops honouring flushes and uses its own io thread`() {
+    fun `legacy speed profile now honours flushes and uses its own io thread`() {
         val joined = argumentsFor(StorageConfig(performance = DiskPerformance.MAXIMUM))
 
-        assertTrue(joined.contains("cache=unsafe"))
+        assertTrue(joined.contains("cache=writeback"))
+        assertFalse(joined.contains("cache=unsafe"))
         assertTrue(joined.contains("-object iothread,id=diskio0"))
         // Order of the device properties is QEMU's business, not ours.
         val blockDevice = joined.split(" ").first { it.startsWith("virtio-blk-pci") }
         assertTrue(blockDevice.contains("drive=rootdisk"))
         assertTrue(blockDevice.contains("iothread=diskio0"))
-        assertFalse(DiskPerformance.MAXIMUM.flushesToDisk)
+        assertTrue(DiskPerformance.MAXIMUM.flushesToDisk)
     }
 
     @Test
-    fun `the fastest profile is what a new VM gets`() {
-        // Emulated storage is the reason a software VM feels slow, so the
-        // default trades crash durability for speed; the other profiles are
-        // one tap away for anyone who needs it back.
-        assertEquals(DiskPerformance.MAXIMUM, StorageConfig().performance)
-        assertFalse(StorageConfig().performance.flushesToDisk)
+    fun `new VMs honor flushes and no selectable or legacy profile uses unsafe caching`() {
+        assertEquals(DiskPerformance.FAST, StorageConfig().performance)
+        assertTrue(StorageConfig().performance.flushesToDisk)
+        DiskPerformance.entries.forEach {
+            assertTrue(it.flushesToDisk)
+            assertFalse(argumentsFor(StorageConfig(performance = it)).contains("cache=unsafe"))
+        }
     }
 
     @Test

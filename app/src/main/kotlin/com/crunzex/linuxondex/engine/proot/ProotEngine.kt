@@ -54,6 +54,12 @@ class ProotEngine(
     private val rootfsInstaller: RootfsImageInstaller = RootfsImageInstaller(paths),
     private val reaper: GuestProcessReaper = GuestProcessReaper(paths),
     private val graphicsBridge: AndroidVirglBridge = AndroidVirglBridge(paths),
+    /**
+     * Private build: only console containers (the devbox) may run. Desktop
+     * images start VNC and SSH services without per-device credentials, and
+     * the bundled-Alpine fallback is not shipped.
+     */
+    private val consoleOnly: Boolean = false,
 ) : VirtualizationEngine {
 
     override val kind: EngineKind = EngineKind.PROOT
@@ -70,6 +76,14 @@ class ProotEngine(
 
     /** Extracted rootfs of the active desktop session; null in legacy mode. */
     private var activeRootfsDir: File? = null
+
+    /**
+     * Console containers: seccomp-accelerated PRoot and a resizable pty, each
+     * only when the image supports it. Desktop sessions keep both off.
+     */
+    @Volatile private var consoleFastSyscalls = false
+    @Volatile private var consoleResizablePty = false
+    @Volatile private var consoleHomeDir: File? = null
 
     /** True only after the native renderer has published its Unix socket. */
     private var graphicsBridgeEnabled = false
@@ -111,6 +125,10 @@ class ProotEngine(
             ?.takeIf { it.format == PreparedImageFormat.PROOT_ROOTFS }
         if (rootfsImage != null) {
             startRootfsImageLocked(config, rootfsImage)
+        } else if (consoleOnly) {
+            throw LxdError.NoEngineAvailable(
+                "Select a console container image (for example the devbox .rootfs.tar.gz)."
+            )
         } else {
             startLegacyShellLocked()
         }
@@ -131,6 +149,12 @@ class ProotEngine(
     private fun startRootfsImageLocked(config: VmConfig, image: PreparedImageConfig) {
         val rootfsDir = extractImageReportingProgress(File(image.diskImagePath))
         if (rootfsDir.resolve(DESKTOP_SUPERVISOR_RELATIVE_PATH).exists()) {
+            if (consoleOnly) {
+                throw LxdError.NoEngineAvailable(
+                    "This build runs console containers only; desktop container images " +
+                        "are not supported. Use the devbox image or a .qcow2 VM."
+                )
+            }
             startDesktopSessionLocked(config, rootfsDir)
         } else {
             startConsoleSessionLocked(rootfsDir)
@@ -148,10 +172,20 @@ class ProotEngine(
     private fun startConsoleSessionLocked(rootfsDir: File) {
         _state.value = VmState.Starting(kind)
         desktopLogFile().delete() // fresh log per start, as the QEMU engine does
+        consoleFastSyscalls = !rootfsDir.resolve(
+            ProotCommandFactory.SLOW_SYSCALLS_MARKER_GUEST_PATH.removePrefix("/")
+        ).exists()
+        consoleResizablePty = rootfsDir.resolve(
+            ProotCommandFactory.RESIZABLE_PTY_GUEST_PATH.removePrefix("/")
+        ).canExecute()
+        consoleHomeDir = persistentHomeFor(rootfsDir)
+        writeAndroidFacts(rootfsDir)
         val command = ProotCommandFactory.consoleSession(
             paths = paths,
             rootfsDir = rootfsDir,
             sharedFolderDir = paths.sharedFolderDir?.also { it.mkdirs() },
+            fastSyscalls = consoleFastSyscalls,
+            homeDir = consoleHomeDir,
         )
         val process = command.start(redirectErrorStream = true)
         sessionProcess = process
@@ -165,7 +199,61 @@ class ProotEngine(
             vncPort = null, // console only: nothing to display
             startedAtMillis = System.currentTimeMillis(),
         )
-        AppLog.info(SCOPE, "console container ready (${rootfsDir.name})")
+        AppLog.info(
+            SCOPE,
+            "console container ready (${rootfsDir.name}, seccomp=$consoleFastSyscalls, " +
+                "resizable pty=$consoleResizablePty)",
+        )
+    }
+
+    /**
+     * The image's persistent home directory, created on first use, or null
+     * when the image keeps its home inside the extracted tree. The name comes
+     * from the image and is reduced to a safe single path segment.
+     */
+    private fun persistentHomeFor(rootfsDir: File): File? {
+        val marker = rootfsDir.resolve(
+            ProotCommandFactory.PERSISTENT_HOME_MARKER_GUEST_PATH.removePrefix("/")
+        )
+        if (!marker.isFile) return null
+        val name = runCatching { marker.readText() }.getOrDefault("")
+            .trim().filter { it.isLetterOrDigit() || it == '-' || it == '_' }.take(40)
+        if (name.isEmpty()) return null
+        return paths.prootHomesDir.resolve(name).apply { mkdirs() }
+    }
+
+    /**
+     * Facts only Android knows, for the guest's own diagnostics (dex-doctor):
+     * chiefly whether the phantom-process killer, which SIGKILLs an app's
+     * process tree past 32 children, is still on.
+     */
+    private fun writeAndroidFacts(rootfsDir: File) {
+        runCatching {
+            val runDir = rootfsDir.resolve("run/dex").apply { mkdirs() }
+            runDir.resolve("android.env").writeText(
+                buildString {
+                    appendLine("ANDROID_SDK=${android.os.Build.VERSION.SDK_INT}")
+                    appendLine("ANDROID_DEVICE='${android.os.Build.MODEL.filter { it != '\'' }}'")
+                    appendLine("ANDROID_PHANTOM_MONITOR=${paths.phantomProcessMonitorSetting() ?: "default"}")
+                    appendLine("ANDROID_CPUS=${Runtime.getRuntime().availableProcessors()}")
+                }
+            )
+        }
+    }
+
+    /**
+     * Gives the image's stop hook a bounded chance to run first; the devbox
+     * uses it to power its Docker VM off cleanly.
+     */
+    private fun runStopHook(rootfsDir: File) {
+        val hook = rootfsDir.resolve(
+            ProotCommandFactory.SESSION_STOP_HOOK_GUEST_PATH.removePrefix("/")
+        )
+        if (!hook.exists()) return
+        runCatching {
+            ProotCommandFactory.sessionStopHook(paths, rootfsDir, consoleFastSyscalls, consoleHomeDir)
+                .runAndCaptureOutput(timeoutSeconds = STOP_HOOK_TIMEOUT_SECONDS)
+        }.onFailure { error -> AppLog.warn(SCOPE, "stop hook failed", error) }
     }
 
     /**
@@ -260,10 +348,10 @@ class ProotEngine(
      * effect right after — extraction is not cancellable, only waited out.
      */
     private fun extractImageReportingProgress(archiveFile: File): File {
-        _state.value = VmState.Preparing("Preparing the Linux desktop")
+        _state.value = VmState.Preparing("Preparing the Linux container")
         return rootfsInstaller.ensureExtracted(archiveFile) { percent ->
             _state.value = VmState.Preparing(
-                "Extracting the Linux desktop (one-time)… $percent%"
+                "Unpacking the Linux container (one-time)… $percent%"
             )
         }
     }
@@ -373,7 +461,7 @@ class ProotEngine(
             }
             _state.value = VmState.Stopping
             shutdownInitiated.set(true)
-
+            activeRootfsDir?.let(::runStopHook)
             closeConsoleShells()
             val exitedGracefully = requestGracefulShutdown(process, gracePeriod)
             endEveryGuestProcess(process)
@@ -438,6 +526,9 @@ class ProotEngine(
     }
 
     private fun cleanupProcesses() {
+        consoleFastSyscalls = false
+        consoleResizablePty = false
+        consoleHomeDir = null
         closeConsoleShells()
         graphicsBridge.stop()
         graphicsBridgeEnabled = false
@@ -494,6 +585,9 @@ class ProotEngine(
                     rootfsDir = rootfsDir,
                     sharedFolderDir = paths.sharedFolderDir,
                     graphicsBridgeEnabled = graphicsBridgeEnabled && graphicsBridge.isRunning,
+                    fastSyscalls = consoleFastSyscalls,
+                    resizablePty = consoleResizablePty,
+                    homeDir = consoleHomeDir,
                 )
                 .startTracked(processIdFile, redirectErrorStream = true)
             val shell = ConsoleShellProcess(
@@ -502,7 +596,7 @@ class ProotEngine(
                 processIdFile = processIdFile,
             )
             consoleShells += shell
-            OwnedShellConsole(shell.process) { terminateConsoleShell(shell) }
+            OwnedShellConsole(shell.process, consoleResizablePty) { terminateConsoleShell(shell) }
         } catch (error: Exception) {
             AppLog.warn(SCOPE, "could not open a shell into the rootfs", error)
             null
@@ -594,15 +688,24 @@ class ProotEngine(
      */
     private class OwnedShellConsole(
         private val shell: Process,
+        override val supportsResize: Boolean,
         private val onClosed: () -> Unit,
     ) : SerialConsoleConnection {
         private val closed = AtomicBoolean(false)
 
         override fun read(buffer: ByteArray): Int = shell.inputStream.read(buffer)
 
+        // Synchronized so a resize request is never interleaved into the
+        // middle of a keystroke or paste being written.
+        @Synchronized
         override fun write(data: ByteArray) {
             shell.outputStream.write(data)
             shell.outputStream.flush()
+        }
+
+        override fun resize(columns: Int, rows: Int) {
+            if (!supportsResize || columns <= 0 || rows <= 0) return
+            write(ProotCommandFactory.resizeSequence(columns, rows))
         }
 
         override fun close() {
@@ -624,6 +727,9 @@ class ProotEngine(
         /** Long enough for a broken container to fail, short enough not to stall. */
         private const val CONSOLE_STARTUP_GRACE_MILLIS = 1_500L
         private const val FORCE_KILL_WAIT_SECONDS = 3L
+
+        /** The Docker VM powers off cleanly in ~5 s; leave room for a slow phone. */
+        private const val STOP_HOOK_TIMEOUT_SECONDS = 45L
         private const val CONSOLE_FORCE_KILL_WAIT_MILLIS = 500L
         private const val CONSOLE_PROCESS_ID_FILE_PREFIX = "proot-console-"
         private const val CONSOLE_PROCESS_ID_FILE_SUFFIX = ".pid"

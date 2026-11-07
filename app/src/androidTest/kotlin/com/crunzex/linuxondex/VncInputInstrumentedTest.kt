@@ -2,6 +2,7 @@ package com.crunzex.linuxondex
 
 import android.graphics.Bitmap
 import android.view.InputDevice
+import android.view.KeyCharacterMap
 import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.inputmethod.EditorInfo
@@ -169,9 +170,106 @@ class VncInputInstrumentedTest {
         )
     }
 
+    @Test
+    fun composingTextAppearsImmediatelyAndCommitDoesNotDuplicateIt() {
+        instrumentation.runOnMainSync {
+            val connection = view.onCreateInputConnection(EditorInfo())!!
+            assertTrue(connection.setComposingText("h", 1))
+            assertEquals(textKeys("h"), inputSink.keyInputs)
+            assertTrue(connection.setComposingText("he", 1))
+            assertTrue(connection.commitText("hello", 1))
+            assertTrue(connection.finishComposingText())
+        }
+        assertEquals(textKeys("hello"), inputSink.keyInputs)
+    }
+
+    @Test
+    fun composingCorrectionReplacesOnlyTheUncommittedSuffix() {
+        instrumentation.runOnMainSync {
+            val connection = view.onCreateInputConnection(EditorInfo())!!
+            assertTrue(connection.setComposingText("cat", 1))
+            assertTrue(connection.setComposingText("car", 1))
+            assertTrue(connection.commitText("car ", 1))
+        }
+        assertEquals(textKeys("cat") + listOf(KeyInput(0xFF08, true), KeyInput(0xFF08, false)) + textKeys("r "), inputSink.keyInputs)
+    }
+
+    @Test
+    fun imeMultipleCharacterEventReachesTheGuest() {
+        instrumentation.runOnMainSync {
+            assertTrue(view.dispatchKeyEvent(KeyEvent(0, "hello", KeyCharacterMap.VIRTUAL_KEYBOARD, 0)))
+        }
+        assertEquals(textKeys("hello"), inputSink.keyInputs)
+    }
+
+    @Test
+    fun multipleCharacterCommitFinishesExistingCompositionOnce() {
+        instrumentation.runOnMainSync {
+            val connection = view.onCreateInputConnection(EditorInfo())!!
+            assertTrue(connection.setComposingText("hel", 1))
+            assertTrue(view.dispatchKeyEvent(KeyEvent(0, "hello", KeyCharacterMap.VIRTUAL_KEYBOARD, 0)))
+        }
+        assertEquals(textKeys("hello"), inputSink.keyInputs)
+    }
+
+    @Test
+    fun backspaceDuringCompositionDoesNotDuplicateTheRemainingWord() {
+        instrumentation.runOnMainSync {
+            val connection = view.onCreateInputConnection(EditorInfo())!!
+            assertTrue(connection.setComposingText("cat", 1))
+            assertTrue(connection.deleteSurroundingText(1, 0))
+            assertTrue(connection.setComposingText("ca", 1))
+            assertTrue(connection.commitText("ca", 1))
+        }
+        assertEquals(textKeys("cat") + listOf(KeyInput(0xFF08, true), KeyInput(0xFF08, false)), inputSink.keyInputs)
+    }
+
+    @Test
+    fun physicalLettersAndCtrlChordsReachTheGuest() {
+        instrumentation.runOnMainSync {
+            for (code in listOf(KeyEvent.KEYCODE_A, KeyEvent.KEYCODE_C)) {
+                val meta = if (code == KeyEvent.KEYCODE_C) KeyEvent.META_CTRL_ON else 0
+                assertTrue(view.dispatchKeyEvent(KeyEvent(0, 1, KeyEvent.ACTION_DOWN, code, 0, meta, KeyCharacterMap.VIRTUAL_KEYBOARD, 0)))
+                assertTrue(view.dispatchKeyEvent(KeyEvent(0, 2, KeyEvent.ACTION_UP, code, 0, meta, KeyCharacterMap.VIRTUAL_KEYBOARD, 0)))
+            }
+        }
+        assertEquals(textKeys("ac"), inputSink.keyInputs)
+    }
+
+    @Test
+    fun keyReleaseUsesTheOriginalCaseAndFocusLossReleasesModifiers() {
+        instrumentation.runOnMainSync {
+            assertTrue(view.dispatchKeyEvent(KeyEvent(0, 1, KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_A, 0, KeyEvent.META_SHIFT_ON, KeyCharacterMap.VIRTUAL_KEYBOARD, 0)))
+            assertTrue(view.dispatchKeyEvent(KeyEvent(0, 2, KeyEvent.ACTION_UP, KeyEvent.KEYCODE_A, 0, 0, KeyCharacterMap.VIRTUAL_KEYBOARD, 0)))
+            assertTrue(view.dispatchKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_CTRL_LEFT)))
+            view.onWindowFocusChanged(false)
+        }
+        assertEquals(textKeys("A") + listOf(KeyInput(0xFFE3, true), KeyInput(0xFFE3, false)), inputSink.keyInputs)
+    }
+
+    @Test
+    fun composingUnicodeCorrectionDoesNotSplitASurrogatePair() {
+        instrumentation.runOnMainSync {
+            val connection = view.onCreateInputConnection(EditorInfo())!!
+            assertTrue(connection.setComposingText("🙂", 1))
+            assertTrue(connection.setComposingText("🙃", 1))
+            assertTrue(connection.commitText("🙃", 1))
+        }
+        assertEquals(
+            listOf(KeyInput(0x0101F642, true), KeyInput(0x0101F642, false),
+                KeyInput(0xFF08, true), KeyInput(0xFF08, false),
+                KeyInput(0x0101F643, true), KeyInput(0x0101F643, false)),
+            inputSink.keyInputs,
+        )
+    }
+
+    private fun textKeys(text: String): List<KeyInput> = text.flatMap {
+        listOf(KeyInput(it.code, true), KeyInput(it.code, false))
+    }
+
     private fun dispatchGeneric(event: MotionEvent) {
         try {
-            instrumentation.runOnMainSync { assertTrue(view.onGenericMotionEvent(event)) }
+            instrumentation.runOnMainSync { assertTrue(view.dispatchGenericMotionEvent(event)) }
         } finally {
             event.recycle()
         }
@@ -179,7 +277,7 @@ class VncInputInstrumentedTest {
 
     private fun dispatchTouch(event: MotionEvent) {
         try {
-            instrumentation.runOnMainSync { assertTrue(view.onTouchEvent(event)) }
+            instrumentation.runOnMainSync { assertTrue(view.dispatchTouchEvent(event)) }
         } finally {
             event.recycle()
         }

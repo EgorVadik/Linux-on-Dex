@@ -2,6 +2,8 @@ package com.crunzex.linuxondex.display.vnc
 
 import android.graphics.Bitmap
 import android.os.SystemClock
+import android.net.LocalSocket
+import android.net.LocalSocketAddress
 import com.crunzex.linuxondex.core.AppLog
 import com.crunzex.linuxondex.core.LxdError
 import java.io.DataInputStream
@@ -14,7 +16,7 @@ import java.util.concurrent.Executors
 import java.util.concurrent.RejectedExecutionException
 
 /**
- * Minimal RFB 3.8 client for QEMU's loopback VNC server: security type
+ * Minimal RFB 3.8 client for QEMU's app-private VNC server: security type
  * "None", RAW + CopyRect + DesktopSize encodings. Local-only by design —
  * this client must never be pointed at a remote host (no encryption).
  *
@@ -30,6 +32,7 @@ class RfbClient(
     private val host: String,
     private val port: Int,
     private val listener: Listener,
+    private val unixSocketPath: String? = null,
 ) : VncInputSink, AutoCloseable {
 
     interface Listener {
@@ -43,7 +46,7 @@ class RfbClient(
     }
 
     @Volatile
-    private var socket: Socket? = null
+    private var socket: AutoCloseable? = null
     private lateinit var input: DataInputStream
     private lateinit var output: DataOutputStream
     private val writeLock = Any()
@@ -74,14 +77,23 @@ class RfbClient(
     fun connect() {
         try {
             if (closed) throw IOException("client was closed before connect")
-            val connectingSocket = Socket()
-            socket = connectingSocket
-            if (closed) throw IOException("client closed while connecting")
-
-            connectingSocket.tcpNoDelay = true
-            connectingSocket.connect(InetSocketAddress(host, port), CONNECT_TIMEOUT_MS)
-            input = DataInputStream(connectingSocket.inputStream.buffered(INPUT_BUFFER_BYTES))
-            output = DataOutputStream(connectingSocket.outputStream.buffered())
+            if (unixSocketPath != null) {
+                val local = LocalSocket()
+                socket = AutoCloseable { local.close() }
+                if (closed) throw IOException("client closed while connecting")
+                local.connect(LocalSocketAddress(unixSocketPath, LocalSocketAddress.Namespace.FILESYSTEM))
+                input = DataInputStream(local.inputStream.buffered(INPUT_BUFFER_BYTES))
+                output = DataOutputStream(local.outputStream.buffered())
+            } else {
+                // Retained for protocol tests; the VM UI supplies a private socket.
+                val connectingSocket = Socket()
+                socket = connectingSocket
+                if (closed) throw IOException("client closed while connecting")
+                connectingSocket.tcpNoDelay = true
+                connectingSocket.connect(InetSocketAddress(host, port), CONNECT_TIMEOUT_MS)
+                input = DataInputStream(connectingSocket.inputStream.buffered(INPUT_BUFFER_BYTES))
+                output = DataOutputStream(connectingSocket.outputStream.buffered())
+            }
 
             negotiateVersion()
             negotiateSecurity()
@@ -138,7 +150,7 @@ class RfbClient(
         }
         val offeredTypes = ByteArray(typeCount).also { input.readFully(it) }
         if (offeredTypes.none { it.toInt() == RfbProtocol.SECURITY_TYPE_NONE }) {
-            throw IOException("server requires authentication; loopback should offer None")
+            throw IOException("server requires authentication; private socket should offer None")
         }
         output.writeByte(RfbProtocol.SECURITY_TYPE_NONE)
         output.flush()

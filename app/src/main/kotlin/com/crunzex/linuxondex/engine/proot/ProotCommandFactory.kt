@@ -52,15 +52,38 @@ object ProotCommandFactory {
         rootfsDir: File,
         sharedFolderDir: File?,
         graphicsBridgeEnabled: Boolean = false,
+        fastSyscalls: Boolean = false,
+        homeDir: File? = null,
     ): NativeCommand = NativeCommand(
         program = paths.prootBinary,
-        arguments = rootfsArguments(paths, rootfsDir, sharedFolderDir, graphicsBridgeEnabled) +
+        arguments = rootfsArguments(paths, rootfsDir, sharedFolderDir, graphicsBridgeEnabled, homeDir) +
             listOf(CONSOLE_SESSION_GUEST_PATH),
         environment = guestEnvironment(
             paths = paths,
             graphicsBridgeEnabled = graphicsBridgeEnabled,
             selectVirglDriver = false,
+            fastSyscalls = fastSyscalls,
         ),
+        workingDirectory = paths.vmRootDir,
+    )
+
+    /**
+     * Runs the image's stop hook, when it has one, before the container is
+     * torn down: the devbox uses it to shut its Docker VM down cleanly
+     * instead of having it killed along with every other guest process.
+     */
+    fun sessionStopHook(
+        paths: VmPaths,
+        rootfsDir: File,
+        fastSyscalls: Boolean = false,
+        homeDir: File? = null,
+    ): NativeCommand = NativeCommand(
+        program = paths.prootBinary,
+        arguments = rootfsArguments(
+            paths, rootfsDir, sharedFolderDir = null, graphicsBridgeEnabled = false, homeDir = homeDir,
+        ) +
+            listOf(SESSION_STOP_HOOK_GUEST_PATH),
+        environment = guestEnvironment(paths = paths, fastSyscalls = fastSyscalls),
         workingDirectory = paths.vmRootDir,
     )
 
@@ -77,17 +100,34 @@ object ProotCommandFactory {
         rootfsDir: File,
         sharedFolderDir: File?,
         graphicsBridgeEnabled: Boolean = false,
+        fastSyscalls: Boolean = false,
+        resizablePty: Boolean = false,
+        homeDir: File? = null,
     ): NativeCommand = NativeCommand(
         program = paths.prootBinary,
-        arguments = rootfsArguments(paths, rootfsDir, sharedFolderDir, graphicsBridgeEnabled) +
-            listOf("/usr/bin/script", "-q", "-c", INTERACTIVE_LOGIN_COMMAND, "/dev/null"),
+        arguments = rootfsArguments(paths, rootfsDir, sharedFolderDir, graphicsBridgeEnabled, homeDir) +
+            if (resizablePty) {
+                // dex-pty: a pty whose size the app sets in-band (see
+                // [resizeSequence]), so full-screen programs follow the window.
+                listOf(RESIZABLE_PTY_GUEST_PATH, "/bin/sh", "-c", INTERACTIVE_LOGIN_COMMAND)
+            } else {
+                listOf("/usr/bin/script", "-q", "-c", INTERACTIVE_LOGIN_COMMAND, "/dev/null")
+            },
         environment = guestEnvironment(
             paths = paths,
             graphicsBridgeEnabled = graphicsBridgeEnabled,
             selectVirglDriver = false,
+            fastSyscalls = fastSyscalls,
         ),
         workingDirectory = paths.vmRootDir,
     )
+
+    /**
+     * The in-band resize request dex-pty understands: an APC string, which
+     * no keyboard produces, removed from the input before the shell sees it.
+     */
+    fun resizeSequence(columns: Int, rows: Int): ByteArray =
+        "\u001b_dexwinsz;$columns;$rows\u001b\\".toByteArray(Charsets.US_ASCII)
 
     /** Headless end-to-end probe: guest Mesa -> virpipe -> Android renderer. */
     fun graphicsProbe(
@@ -146,6 +186,7 @@ object ProotCommandFactory {
         rootfsDir: File,
         sharedFolderDir: File?,
         graphicsBridgeEnabled: Boolean,
+        homeDir: File? = null,
     ): List<String> {
         val arguments = mutableListOf(
             "--kill-on-exit",
@@ -158,6 +199,17 @@ object ProotCommandFactory {
             "-b", "/sys",
             "-b", "${paths.prootSharedMemoryDir.absolutePath}:/dev/shm",
         )
+        if (homeDir != null) {
+            // The user's home lives outside the extracted image, so replacing
+            // the image with a newer one keeps projects, sign-ins and the
+            // Docker data disk. Bound before ~/shared, which nests inside it.
+            arguments += listOf("-b", "${homeDir.absolutePath}:$HOME_GUEST_PATH")
+        }
+        // A short host directory for the guest's Unix sockets: socket paths
+        // are limited to 107 bytes on the host, and a path inside the rootfs
+        // (deep in app storage) exceeds that. Private to the app like the
+        // rest of its storage.
+        arguments += listOf("-b", "${paths.prootSocketDir.absolutePath}:$SOCKET_DIR_GUEST_PATH")
         if (sharedFolderDir != null) {
             // The same folder the QEMU guests see over 9p, reachable from
             // Android's Files app — the natural way to move files in and out.
@@ -184,8 +236,9 @@ object ProotCommandFactory {
         paths: VmPaths,
         graphicsBridgeEnabled: Boolean = false,
         selectVirglDriver: Boolean = false,
+        fastSyscalls: Boolean = false,
     ): Map<String, String> {
-        val environment = paths.processEnvironment() + mapOf(
+        val baseEnvironment = paths.processEnvironment() + mapOf(
             // PROOT_* are read by PRoot itself, so they stay host paths.
             "PROOT_LOADER" to paths.prootLoaderBinary.absolutePath,
             "PROOT_TMP_DIR" to paths.tmpDir.absolutePath,
@@ -207,6 +260,17 @@ object ProotCommandFactory {
             "COLORTERM" to "truecolor",
             "LANG" to "C.UTF-8",
         )
+        // Console containers turn PRoot's seccomp fast path back on: only the
+        // path-carrying syscalls stop in the tracer, everything else (reads,
+        // writes, futexes, mmap…) runs at kernel speed. That is most of the
+        // difference between PRoot feeling native and feeling emulated for
+        // node, git and compilers. The ENOSYS failures above were seen with
+        // the multi-process X desktop, which keeps the slow, safe path.
+        val environment = if (fastSyscalls) {
+            baseEnvironment - "PROOT_NO_SECCOMP"
+        } else {
+            baseEnvironment
+        }
         if (!graphicsBridgeEnabled) return environment
         val bridgeEnvironment = environment + mapOf(
             "DEX_GPU_BRIDGE" to "1",
@@ -228,6 +292,22 @@ object ProotCommandFactory {
 
     const val DESKTOP_SUPERVISOR_GUEST_PATH = "/usr/local/bin/dex-desktop"
     const val CONSOLE_SESSION_GUEST_PATH = "/usr/local/bin/dex-session"
+    const val SOCKET_DIR_GUEST_PATH = "/run/dexsock"
+    const val HOME_GUEST_PATH = "/root"
+
+    /**
+     * An image that wants a persistent home ships this file; its content
+     * names the home (e.g. "devbox"), so successive versions share it.
+     */
+    const val PERSISTENT_HOME_MARKER_GUEST_PATH = "/etc/dex/persistent-home"
+    const val SESSION_STOP_HOOK_GUEST_PATH = "/usr/local/bin/dex-session-stop"
+    const val RESIZABLE_PTY_GUEST_PATH = "/usr/local/bin/dex-pty"
+
+    /**
+     * An image opts out of the seccomp fast path by shipping this file — the
+     * escape hatch should a kernel misbehave with it.
+     */
+    const val SLOW_SYSCALLS_MARKER_GUEST_PATH = "/etc/dex/proot-no-seccomp"
     const val SHARED_FOLDER_GUEST_PATH = "/root/shared"
     const val VIRGL_SOCKET_GUEST_PATH = "/tmp/.virgl_test"
 

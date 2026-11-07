@@ -12,6 +12,7 @@ import android.text.InputType
 import android.view.InputDevice
 import android.view.KeyEvent
 import android.view.MotionEvent
+import android.view.PointerIcon
 import android.view.View
 import android.view.inputmethod.BaseInputConnection
 import android.view.inputmethod.EditorInfo
@@ -44,6 +45,8 @@ class VncView(context: Context) : View(context) {
     private var longPressPending = false
     private var longPressPerformed = false
     private var touchMoved = false
+    private val pressedKeys = mutableMapOf<Pair<Int, Int>, Int>()
+    private var textConnection: RemoteInputConnection? = null
     private var downX = 0f
     private var downY = 0f
 
@@ -68,6 +71,7 @@ class VncView(context: Context) : View(context) {
 
     fun unbindInputTarget(target: VncInputSink) {
         if (inputTarget === target) {
+            releaseInput()
             inputTarget = null
             currentButtonMask = 0
             cancelPendingRightClick()
@@ -122,8 +126,10 @@ class VncView(context: Context) : View(context) {
     override fun onTouchEvent(event: MotionEvent): Boolean {
         inputTarget ?: return false
         if (!mapGuestCoordinates(event.x, event.y)) return true
+        if (event.actionMasked == MotionEvent.ACTION_DOWN) textConnection?.finishComposingText()
 
-        if (event.isFromSource(InputDevice.SOURCE_MOUSE) ||
+        if (event.getToolType(0) == MotionEvent.TOOL_TYPE_MOUSE ||
+            event.isFromSource(InputDevice.SOURCE_MOUSE) ||
             event.isFromSource(InputDevice.SOURCE_MOUSE_RELATIVE)
         ) {
             return handleMouseTouchEvent(event)
@@ -201,7 +207,26 @@ class VncView(context: Context) : View(context) {
         return true
     }
 
-    /** DeX / mouse: hover moves, real buttons click, wheel scrolls. */
+    // Android dispatches mouse hover here before onGenericMotionEvent. The
+    // default clickable View consumes it, so handling hover only there loses it.
+    override fun onHoverEvent(event: MotionEvent): Boolean {
+        if (inputTarget == null || !mapGuestCoordinates(event.x, event.y)) {
+            return super.onHoverEvent(event)
+        }
+        return when (event.actionMasked) {
+            MotionEvent.ACTION_HOVER_ENTER, MotionEvent.ACTION_HOVER_MOVE -> {
+                movePointer(mappedGuestX, mappedGuestY)
+                true
+            }
+            MotionEvent.ACTION_HOVER_EXIT -> true
+            else -> super.onHoverEvent(event)
+        }
+    }
+
+    override fun onResolvePointerIcon(event: MotionEvent, pointerIndex: Int): PointerIcon =
+        PointerIcon.getSystemIcon(context, PointerIcon.TYPE_ARROW)
+
+    /** DeX / mouse: real buttons click, wheel scrolls. */
     override fun onGenericMotionEvent(event: MotionEvent): Boolean {
         val client = inputTarget ?: return false
         if (!mapGuestCoordinates(event.x, event.y)) return true
@@ -209,6 +234,7 @@ class VncView(context: Context) : View(context) {
             MotionEvent.ACTION_HOVER_MOVE, MotionEvent.ACTION_HOVER_ENTER ->
                 movePointer(mappedGuestX, mappedGuestY)
             MotionEvent.ACTION_BUTTON_PRESS -> {
+                textConnection?.finishComposingText()
                 currentButtonMask = androidButtonsToMask(event.buttonState) or
                     androidButtonToMask(event.actionButton)
                 requestFocus()
@@ -324,14 +350,39 @@ class VncView(context: Context) : View(context) {
     override fun onKeyUp(keyCode: Int, event: KeyEvent): Boolean =
         forwardKey(event, isDown = false) || super.onKeyUp(keyCode, event)
 
+    // BaseInputConnection's fallback sends whole strings as ACTION_MULTIPLE,
+    // not individual onKeyDown callbacks, including from some physical IMEs.
+    override fun onKeyMultiple(keyCode: Int, repeatCount: Int, event: KeyEvent): Boolean {
+        if (keyCode == KeyEvent.KEYCODE_UNKNOWN && event.characters != null) {
+            return textConnection?.commitText(event.characters, 1) ?: sendCommittedText(event.characters)
+        }
+        return super.onKeyMultiple(keyCode, repeatCount, event)
+    }
+
     override fun onWindowFocusChanged(hasWindowFocus: Boolean) {
         super.onWindowFocusChanged(hasWindowFocus)
-        if (hasWindowFocus) post { requestFocus() }
+        if (hasWindowFocus) post { requestFocus() } else releaseInput()
+    }
+
+    private fun releaseInput() {
+        val target = inputTarget
+        pressedKeys.values.forEach { target?.sendKeyEvent(it, false) }
+        pressedKeys.clear()
+        if (currentButtonMask != 0) target?.sendPointerEvent(lastPointerX, lastPointerY, 0)
+        currentButtonMask = 0
+        textConnection?.finishComposingText()
+        cancelPendingRightClick()
     }
 
     private fun forwardKey(event: KeyEvent, isDown: Boolean): Boolean {
         val client = inputTarget ?: return false
-        val keysym = VncKeyMap.keysymFor(event) ?: return false
+        val key = event.deviceId to event.keyCode
+        val keysym = if (isDown) {
+            VncKeyMap.keysymFor(event)?.also { pressedKeys[key] = it }
+        } else {
+            pressedKeys.remove(key) ?: VncKeyMap.keysymFor(event)
+        } ?: return false
+        textConnection?.finishComposingText()
         client.sendKeyEvent(keysym, isDown)
         return true
     }
@@ -341,25 +392,74 @@ class VncView(context: Context) : View(context) {
      * most IMEs commit text instead of synthesising hardware [KeyEvent]s.
      */
     override fun onCreateInputConnection(outAttrs: EditorInfo): InputConnection? {
-        outAttrs.inputType = InputType.TYPE_CLASS_TEXT or
-            InputType.TYPE_TEXT_FLAG_MULTI_LINE or
-            InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+        // This is a remote keyboard, not an Android text field. Ask IMEs for
+        // raw keys, while still supporting those that send text/composition.
+        outAttrs.inputType = InputType.TYPE_NULL
         outAttrs.imeOptions = EditorInfo.IME_ACTION_NONE or
             EditorInfo.IME_FLAG_NO_EXTRACT_UI or
             EditorInfo.IME_FLAG_NO_FULLSCREEN
-        return RemoteInputConnection()
+        textConnection?.finishComposingText()
+        return RemoteInputConnection().also { textConnection = it }
     }
 
     override fun onCheckIsTextEditor(): Boolean = true
 
     private inner class RemoteInputConnection : BaseInputConnection(this@VncView, false) {
-        override fun commitText(text: CharSequence?, newCursorPosition: Int): Boolean =
-            text != null && sendCommittedText(text)
+        private var composingText = ""
+
+        override fun setComposingText(text: CharSequence?, newCursorPosition: Int): Boolean =
+            text != null && replaceComposition(text.toString())
+
+        override fun commitText(text: CharSequence?, newCursorPosition: Int): Boolean {
+            if (text == null || !replaceComposition(text.toString())) return false
+            composingText = ""
+            return true
+        }
+
+        override fun finishComposingText(): Boolean {
+            // Provisional characters are already visible in the remote editor.
+            composingText = ""
+            return true
+        }
+
+        private fun replaceComposition(next: String): Boolean {
+            if (inputTarget == null) return false
+            var common = 0
+            while (common < composingText.length && common < next.length) {
+                val previousPoint = Character.codePointAt(composingText, common)
+                if (previousPoint != Character.codePointAt(next, common)) break
+                common += Character.charCount(previousPoint)
+            }
+            val removed = composingText.codePointCount(common, composingText.length)
+            if (!sendRepeatedKey(XK_BACKSPACE, removed) || !sendCommittedText(next.substring(common))) {
+                return false
+            }
+            composingText = next
+            return true
+        }
 
         override fun deleteSurroundingText(beforeLength: Int, afterLength: Int): Boolean {
             if (beforeLength < 0 || afterLength < 0) return false
+            var remaining = (composingText.length - beforeLength).coerceAtLeast(0)
+            if (remaining > 0 && remaining < composingText.length &&
+                Character.isLowSurrogate(composingText[remaining])
+            ) remaining--
+            val knownUnits = composingText.length - remaining
+            val backspaces = composingText.codePointCount(remaining, composingText.length) +
+                (beforeLength - knownUnits).coerceAtLeast(0)
+            val backspacesSent = sendRepeatedKey(XK_BACKSPACE, backspaces)
+            val deletesSent = sendRepeatedKey(XK_DELETE, afterLength)
+            if (backspacesSent) composingText = composingText.substring(0, remaining)
+            return backspacesSent && deletesSent
+        }
+
+        override fun deleteSurroundingTextInCodePoints(beforeLength: Int, afterLength: Int): Boolean {
+            if (beforeLength < 0 || afterLength < 0) return false
+            val count = composingText.codePointCount(0, composingText.length)
+            val remaining = composingText.offsetByCodePoints(composingText.length, -minOf(count, beforeLength))
             val backspacesSent = sendRepeatedKey(XK_BACKSPACE, beforeLength)
             val deletesSent = sendRepeatedKey(XK_DELETE, afterLength)
+            if (backspacesSent) composingText = composingText.substring(0, remaining)
             return backspacesSent && deletesSent
         }
 

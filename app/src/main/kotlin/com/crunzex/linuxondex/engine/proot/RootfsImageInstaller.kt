@@ -43,6 +43,7 @@ class RootfsImageInstaller(private val paths: VmPaths) {
         }
 
         discardPreviousExtraction(rootfsDir)
+        pruneOrphanedExtractions(keep = rootfsDir, archiveDir = archiveFile.parentFile)
         requireFreeSpaceFor(archiveFile)
         extractInto(archiveFile, rootfsDir, onProgressPercent)
         writeDefaultDnsConfig(rootfsDir)
@@ -91,6 +92,27 @@ class RootfsImageInstaller(private val paths: VmPaths) {
         }
         val elapsedSeconds = (System.currentTimeMillis() - startedAt) / 1000
         AppLog.info(SCOPE, "rootfs extracted in ${elapsedSeconds}s: ${rootfsDir.name}")
+    }
+
+    /**
+     * Removes unpacked trees whose archive is gone (deleted outside the app,
+     * or by an older build that left the tree behind), before a new archive
+     * is unpacked: each is ~1.5 GB and nothing can boot it any more. Homes
+     * live in a separate directory, so no user files are in these trees.
+     */
+    private fun pruneOrphanedExtractions(keep: File, archiveDir: File?) {
+        if (archiveDir == null || !archiveDir.isDirectory) return
+        val wanted = archiveDir.listFiles().orEmpty()
+            .filter { it.isFile && it.name.endsWith(ROOTFS_ARCHIVE_SUFFIX_FOR_PRUNING) }
+            .map { paths.prootRootfsDirFor(it.name).name }
+            .toSet() + keep.name
+        paths.prootImagesDir.listFiles().orEmpty()
+            .filter { it.isDirectory && it.name !in wanted }
+            .filter { it.resolve(STAMP_FILE_NAME).exists() } // only trees this class made
+            .forEach { orphan ->
+                AppLog.info(SCOPE, "removing unpacked image whose archive is gone: ${orphan.name}")
+                orphan.deleteRecursively()
+            }
     }
 
     private fun discardPreviousExtraction(rootfsDir: File) {
@@ -162,6 +184,7 @@ class RootfsImageInstaller(private val paths: VmPaths) {
     companion object {
         private const val SCOPE = "RootfsImageInstaller"
         private const val STAMP_FILE_NAME = ".linux-on-dex-rootfs-stamp"
+        private const val ROOTFS_ARCHIVE_SUFFIX_FOR_PRUNING = ".rootfs.tar.gz"
         private const val FILE_BUFFER_BYTES = 1 shl 18
         private const val GZIP_BUFFER_BYTES = 1 shl 16
         private const val EXTRACTED_SIZE_FACTOR = 4L

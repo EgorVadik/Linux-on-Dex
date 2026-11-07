@@ -68,6 +68,7 @@ class QemuVmEngine(
 
     private fun qmpSocketFile(vmId: String) = paths.socketsDir.resolve("$vmId-qmp.sock")
     private fun serialSocketFile(vmId: String) = paths.socketsDir.resolve("$vmId-serial.sock")
+    private fun vncSocketFile(vmId: String) = paths.socketsDir.resolve("$vmId-vnc.sock")
 
     /** Socket for extra console [index] (0 → guest /dev/hvc0). */
     private fun extraConsoleSocketFile(vmId: String, index: Int) =
@@ -130,8 +131,9 @@ class QemuVmEngine(
             engine = kind,
             vncPort = config.vncPort,
             startedAtMillis = System.currentTimeMillis(),
+            vncSocketPath = vncSocketFile(config.id).absolutePath,
         )
-        AppLog.info(SCOPE, "VM '${config.id}' running via $kind on VNC port ${config.vncPort}")
+        AppLog.info(SCOPE, "VM '${config.id}' running via $kind with private display socket")
     }
 
     /** Arms VM-scoped attach/detach monitoring after QMP becomes reachable. */
@@ -466,6 +468,7 @@ class QemuVmEngine(
     }
 
     private fun deleteStaleSockets(vmId: String) {
+        vncSocketFile(vmId).delete()
         qmpSocketFile(vmId).delete()
         serialSocketFile(vmId).delete()
         extraConsoleSocketFiles(vmId).forEach { it.delete() }

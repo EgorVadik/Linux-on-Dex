@@ -150,6 +150,11 @@ class TerminalSession(
         viewSizeKnown = true
         screen.resize(columns, rows)
         notifyScreenChanged()
+        // A real pty on the other end (the devbox's dex-pty) takes the size
+        // out of band of the user's input, so it can follow every change.
+        connection?.takeIf { it.supportsResize }?.let { pty ->
+            scope.launch { runCatching { pty.resize(columns, rows) } }
+        }
     }
 
     /**
@@ -166,6 +171,11 @@ class TerminalSession(
      * prompt is cleared instead of corrupting the command.
      */
     fun syncGuestSizeToScreen() {
+        val pty = connection
+        if (pty != null && pty.supportsResize) {
+            scope.launch { runCatching { pty.resize(screen.columns, screen.rows) } }
+            return
+        }
         sendBytes(buildSttySizeCommand(screen.rows, screen.columns))
     }
 
@@ -198,6 +208,9 @@ class TerminalSession(
 
             consecutiveFailures = 0
             connection = serial
+            if (serial.supportsResize) {
+                runCatching { serial.resize(screen.columns, screen.rows) }
+            }
             setStatus("Connected", connected = true)
             streamUntilClosed(serial)
             runCatching { serial.close() }

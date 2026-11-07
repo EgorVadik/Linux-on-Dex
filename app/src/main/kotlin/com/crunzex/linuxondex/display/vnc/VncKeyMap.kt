@@ -45,7 +45,11 @@ object VncKeyMap {
     /** Returns the keysym for this event, or null when there is no mapping. */
     fun keysymFor(event: KeyEvent): Int? {
         specialKeys[event.keyCode]?.let { return it }
-        val unicode = event.unicodeChar
+        // Ctrl+C's Android unicodeChar can be a control character. VNC needs
+        // the printable key as well as the separate Ctrl press/release.
+        val unicode = event.getUnicodeChar(
+            event.metaState and KeyEvent.META_CTRL_MASK.inv(),
+        )
         // Strip the combining-accent flag; ignore pure modifier state changes.
         val printable = unicode and KeyCharacterMap.COMBINING_ACCENT.inv()
         return keysymForCodePoint(printable)

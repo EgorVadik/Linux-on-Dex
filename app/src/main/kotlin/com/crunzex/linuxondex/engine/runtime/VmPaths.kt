@@ -28,13 +28,27 @@ class VmPaths(
     filesDir: File,
     cacheDir: File,
     externalFilesDir: (kind: String) -> File?,
+    private val globalSetting: (name: String) -> String? = { null },
 ) {
     constructor(context: Context) : this(
         nativeLibraryDir = File(context.applicationInfo.nativeLibraryDir),
         filesDir = context.filesDir,
         cacheDir = context.cacheDir,
         externalFilesDir = { kind -> context.getExternalFilesDir(kind) },
+        globalSetting = { name ->
+            kotlin.runCatching {
+                android.provider.Settings.Global.getString(context.contentResolver, name)
+            }.getOrNull()
+        },
     )
+
+    /**
+     * "false" once the user turned Android's phantom-process killer off
+     * (Developer options → Disable child process restrictions, or adb);
+     * null while it is at its default, which is on.
+     */
+    fun phantomProcessMonitorSetting(): String? =
+        globalSetting("settings_enable_monitor_phantom_procs")
 
     val qemuSystemBinary: File = nativeLibraryDir.resolve("libqemu-system-aarch64.so")
     val qemuImgBinary: File = nativeLibraryDir.resolve("libqemu-img.so")
@@ -68,6 +82,15 @@ class VmPaths(
     val virglSocket: File = socketsDir.resolve("virgl-renderer.sock")
     val logsDir: File = vmRootDir.resolve("logs")
     val tmpDir: File = cacheDir.resolve("vm-tmp")
+
+    /**
+     * Persistent homes of console containers, one per image family, kept
+     * outside [prootImagesDir] so replacing an image never deletes them.
+     */
+    val prootHomesDir: File = vmRootDir.resolve("proot-homes")
+
+    /** Bound at /run/dexsock in PRoot guests; kept short for socket paths. */
+    val prootSocketDir: File = filesDir.resolve("ps")
 
     /** ISOs the user dropped into Android/data/<pkg>/files/isos via USB/DeX. */
     val externalIsosDir: File? = externalFilesDir("isos")
@@ -111,7 +134,7 @@ class VmPaths(
     fun createRuntimeDirectories() {
         listOf(
             vmRootDir, qemuDataDir, disksDir, isosDir, prootRootfsDir,
-            prootImagesDir, prootSharedMemoryDir,
+            prootImagesDir, prootSharedMemoryDir, prootSocketDir, prootHomesDir,
             socketsDir, logsDir, tmpDir, screenshotsDir,
         ).forEach { directory -> directory.mkdirs() }
         sharedFolderDir?.mkdirs()

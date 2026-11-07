@@ -36,12 +36,16 @@ import re
 import shutil
 import subprocess
 import sys
+from datetime import datetime, timezone, timedelta
+from email.utils import parsedate_to_datetime
+import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 
 TERMUX_REPO_URL = "https://packages.termux.dev/apt/termux-main"
 TERMUX_INDEX_URL = f"{TERMUX_REPO_URL}/dists/stable/main/binary-aarch64/Packages"
+TERMUX_POOL_MIRRORS = ("https://mirror.mwt.me/termux/main",)
 
 ALPINE_MINIROOTFS_URL = (
     "https://dl-cdn.alpinelinux.org/alpine/v3.22/releases/aarch64/"
@@ -57,8 +61,9 @@ TERMUX_PREFIX = "data/data/com.termux/files"
 ROOT_PACKAGES = [
     "qemu-system-aarch64-headless",
     "qemu-utils",
+    # Console containers only (the devbox): native-speed Linux userland.
+    # The desktop graphics bridge (virglrenderer/ANGLE) stays out.
     "proot",
-    "virglrenderer-android",
 ]
 
 # Executables to expose in jniLibs, renamed to lib*.so.
@@ -67,7 +72,6 @@ EXECUTABLES = {
     "usr/bin/qemu-img": "libqemu-img.so",
     "usr/bin/proot": "libproot.so",
     "usr/libexec/proot/loader": "libproot-loader.so",
-    "usr/bin/virgl_test_server_android": "libvirgl-test-server-android.so",
 }
 
 # Termux's Android virgl build embeds the Termux data directory for its ANGLE
@@ -383,7 +387,7 @@ def patch_and_install_elves(
         shutil.copy2(source, destination)
         destination.chmod(0o755)
 
-        if output_name == EXECUTABLES["usr/bin/virgl_test_server_android"]:
+        if output_name == EXECUTABLES.get("usr/bin/virgl_test_server_android"):
             rewrite_embedded_paths(destination, ANGLE_PATH_REPLACEMENTS)
         if output_name == "libvirglrenderer.so":
             rewrite_fixed_bytes(destination, VIRGL_GLES_CONTEXT_PATCH)
@@ -571,8 +575,35 @@ def main() -> None:
     if patchelf is None:
         fail("patchelf not found — install it first (brew install patchelf)")
 
+    # Authenticate the package index with the repository's signing key,
+    # then authenticate every .deb through that index. HTTPS alone is not
+    # a substitute for the distribution's package signatures.
+    keyring = PROJECT_ROOT / "tools/keys/termux-autobuilds.gpg"
+    if sha256_of(keyring) != "21c385d5a30107453bd60582d64e2f6e5f5ce11e340ac05e57f943f9c0235420":
+        fail("unexpected repository signing key")
+    release_signature = work_dir / "InRelease"
+    release_plain = work_dir / "Release"
+    download(f"{TERMUX_REPO_URL}/dists/stable/InRelease", release_signature)
+    subprocess.run([
+        "gpgv", "--keyring", str(keyring),
+        str(release_signature),
+    ], check=True)
+    # gpgv authenticates clear-signed content but does not extract it on all
+    # versions. Decode the authenticated cleartext with OpenPGP dash unescaping.
+    signed = release_signature.read_text()
+    release_text = signed.split("\n\n", 1)[1].split("-----BEGIN PGP SIGNATURE-----", 1)[0]
+    release_text = "\n".join(line[2:] if line.startswith("- ") else line
+                             for line in release_text.splitlines())
+    release_plain.write_text(release_text)
+    release_date = parsedate_to_datetime(re.search(r"^Date: (.+)$", release_text, re.M)[1])
+    age = datetime.now(timezone.utc) - release_date
+    if not timedelta(days=-1) <= age <= timedelta(days=14):
+        fail("repository signature is stale or from the future")
+    sha_section = release_text.split("SHA256:\n", 1)[1].split("\n\n", 1)[0]
+    index_hash = next(line.split()[0] for line in sha_section.splitlines()
+                      if len(line.split()) == 3 and line.split()[2] == "main/binary-aarch64/Packages")
     index_path = work_dir / "Packages"
-    download(TERMUX_INDEX_URL, index_path)
+    download(TERMUX_INDEX_URL, index_path, index_hash)
     packages = parse_package_index(index_path.read_text(errors="replace"))
     closure = resolve_dependency_closure(packages, ROOT_PACKAGES)
 
@@ -580,16 +611,27 @@ def main() -> None:
     if extract_root.exists():
         shutil.rmtree(extract_root)
     for package in closure:
+        if not re.fullmatch(r"[0-9a-f]{64}", package.sha256):
+            fail(f"missing signed SHA256 for {package.name}")
         deb_path = work_dir / "downloads" / Path(package.filename).name
-        download(f"{TERMUX_REPO_URL}/{package.filename}", deb_path, package.sha256)
+        # The signed index can lag the primary pool by a rebuild, in which
+        # case the exact file it names is only left on mirrors. The SHA256
+        # from the signed index is checked either way.
+        for repo_url in (TERMUX_REPO_URL, *TERMUX_POOL_MIRRORS):
+            try:
+                download(f"{repo_url}/{package.filename}", deb_path, package.sha256)
+                break
+            except urllib.error.HTTPError as error:
+                if error.code != 404 or repo_url == TERMUX_POOL_MIRRORS[-1]:
+                    raise
+                log(f"{package.filename} not on {repo_url}; trying a mirror")
         extract_deb(deb_path, extract_root / package.name)
 
     outputs, rename_map = repackage_elves(extract_root, patchelf)
     patch_and_install_elves(outputs, rename_map, patchelf)
     check_unresolved_dependencies(patchelf)
     install_qemu_data_files(extract_root)
-    install_proot_rootfs(work_dir)
-    install_angle_libraries(extract_root)
+    # PRoot ships for console containers; no host graphics bridge is shipped.
     write_payload_manifest(closure)
     log("payload ready — rebuild the APK to pick it up")
 

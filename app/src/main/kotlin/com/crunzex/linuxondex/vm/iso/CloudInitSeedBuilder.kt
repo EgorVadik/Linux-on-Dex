@@ -7,7 +7,7 @@ import java.io.File
 /**
  * Builds the cloud-init NoCloud seed a ready-made cloud image needs on its
  * first boot: the login account, an auto-logged-in serial console, and the
- * first-boot chores switched off.
+ * first-boot configuration.
  *
  * Generating it in the app means the user imports one file — the disk image
  * — instead of having to produce and copy a matching seed alongside it.
@@ -18,7 +18,8 @@ object CloudInitSeedBuilder {
     private const val SEED_VOLUME_LABEL = "cidata"
 
     /**
-     * Writes a seed ISO configuring [username]/[password] to [outputFile].
+     * Writes a seed ISO configuring a locked [username] account to [outputFile].
+     * [password] is retained for source compatibility and is never installed.
      *
      * @return the file written, so callers can store its path.
      */
@@ -52,10 +53,8 @@ object CloudInitSeedBuilder {
     /**
      * The cloud-config applied on first boot.
      *
-     * Everything disabled here costs real time under software emulation and
-     * buys a phone nothing: snap seeding, unattended upgrades, the daily apt
-     * timers, and the Qualcomm-only units Ubuntu ships that restart forever
-     * on QEMU's `virt` board.
+     * Only unnecessary platform services are disabled. Security update
+     * services and APT timers retain the distribution defaults.
      *
      * Internal so tests can assert on the document without unpacking an ISO.
      */
@@ -70,10 +69,9 @@ object CloudInitSeedBuilder {
             groups: [adm, sudo, users, video, audio, plugdev]
             shell: /bin/bash
             sudo: "ALL=(ALL) NOPASSWD:ALL"
-            lock_passwd: false
-            plain_text_passwd: $password
+            lock_passwd: true
 
-        ssh_pwauth: true
+        ssh_pwauth: false
         disable_root: true
         datasource_list: [NoCloud, None]
 
@@ -160,8 +158,6 @@ object CloudInitSeedBuilder {
         runcmd:
           # Missing units (snapd on Debian, …) just log and move on.
           - [sh, -c, "systemctl disable --now snapd.service snapd.socket snapd.seeded.service 2>/dev/null || true"]
-          - [sh, -c, "systemctl disable --now unattended-upgrades.service 2>/dev/null || true"]
-          - [sh, -c, "systemctl disable --now apt-daily.timer apt-daily-upgrade.timer 2>/dev/null || true"]
           - [systemctl, mask, systemd-networkd-wait-online.service]
           - [systemctl, mask, pd-mapper.service, qrtr-ns.service]
           - [systemctl, daemon-reload]
@@ -179,7 +175,7 @@ object CloudInitSeedBuilder {
           - [sh, -c, "systemctl restart serial-getty@hvc0.service 2>/dev/null || true"]
           - [sh, -c, "systemctl restart serial-getty@hvc1.service 2>/dev/null || true"]
 
-        final_message: "Linux on DeX is ready. Log in as $username/$password."
+        final_message: "Linux on DeX is ready. Private local console for $username; SSH password login disabled."
     """.trimIndent() + "\n"
 
     internal fun renderMetaData(): String =

@@ -276,6 +276,7 @@ private fun DestinationPane(
             val context = LocalContext.current
             DisplayScreen(
                 vncPort = (uiState.vmState as? VmState.Running)?.vncPort,
+                vncSocketPath = (uiState.vmState as? VmState.Running)?.vncSocketPath,
                 onBack = onBack,
                 onOpenInNewWindow = {
                     context.startActivity(DisplayActivity.launchIntent(context))

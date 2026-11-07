@@ -312,7 +312,7 @@ class QemuCommandBuilderTest {
         assertTrue(gpu.contains("xres=1920"))
         assertTrue(gpu.contains("yres=1080"))
         assertTrue(gpu.contains("edid=on"))
-        assertEquals("127.0.0.1:3", valueAfter(arguments, "-vnc"))
+        assertEquals("unix:/data/vm/sockets/primary-vnc.sock", valueAfter(arguments, "-vnc"))
     }
 
     @Test
@@ -326,10 +326,11 @@ class QemuCommandBuilderTest {
     }
 
     @Test
-    fun `vnc always listens on loopback only`() {
+    fun `vnc uses a private filesystem socket instead of shared Android loopback`() {
         val arguments = QemuCommandBuilder.build(plan())
 
-        assertTrue(valueAfter(arguments, "-vnc").startsWith("127.0.0.1:"))
+        assertEquals("unix:/data/vm/sockets/primary-vnc.sock", valueAfter(arguments, "-vnc"))
+        assertFalse(valueAfter(arguments, "-vnc").contains("127.0.0.1"))
     }
 
     // ---- Network -----------------------------------------------------------

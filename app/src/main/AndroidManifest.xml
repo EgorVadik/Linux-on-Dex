@@ -62,7 +62,7 @@
             android:exported="false"
             android:label="Linux Terminal"
             android:resizeableActivity="true"
-            android:taskAffinity="com.crunzex.linuxondex.window.terminal"
+            android:taskAffinity="com.crunzex.linuxondex.privatebuild.window.terminal"
             android:windowSoftInputMode="adjustResize" />
         <activity
             android:name=".ui.DisplayActivity"
@@ -71,7 +71,7 @@
             android:label="Linux Display"
             android:launchMode="singleTask"
             android:resizeableActivity="true"
-            android:taskAffinity="com.crunzex.linuxondex.window.display"
+            android:taskAffinity="com.crunzex.linuxondex.privatebuild.window.display"
             android:windowSoftInputMode="adjustResize" />
 
         <service

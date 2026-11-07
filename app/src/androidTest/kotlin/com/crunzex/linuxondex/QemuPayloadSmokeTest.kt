@@ -75,41 +75,10 @@ class QemuPayloadSmokeTest {
     }
 
     @Test
-    fun prootBinaryExecutes() {
-        val result = NativeCommand(
-            program = paths.prootBinary,
-            arguments = listOf("--version"),
-            environment = paths.processEnvironment() +
-                ("PROOT_LOADER" to paths.prootLoaderBinary.absolutePath),
-        ).runAndCaptureOutput()
-
-        assertEquals("proot --version should exit 0; output: ${result.output}", 0, result.exitCode)
-        assertTrue(
-            "unexpected proot banner: ${result.output}",
-            result.output.contains("proot", ignoreCase = true),
-        )
-    }
-
-    @Test
-    fun nativeVirglBridgePublishesItsSocket() {
-        val context = InstrumentationRegistry.getInstrumentation().targetContext
-        PayloadInstaller(context, paths).ensureInstalled()
-        val bridge = AndroidVirglBridge(paths)
-
-        try {
-            assertTrue(
-                "virgl/ANGLE did not publish ${paths.virglSocket}; see virgl-renderer.log",
-                bridge.start(),
-            )
-            assertTrue("virgl bridge process/socket is not alive", bridge.isRunning)
-            assertTrue(
-                "ANGLE Vulkan backend was not installed",
-                paths.vmRootDir.resolve("angle/vulkan/libEGL_angle.so").exists(),
-            )
-        } finally {
-            bridge.stop()
-        }
-        assertTrue("virgl socket leaked after stop", !paths.virglSocket.exists())
+    fun consoleContainerRuntimeShipsWithoutGraphicsBridge() {
+        assertTrue("PRoot is required for the devbox console container", paths.prootBinary.exists())
+        assertTrue("PRoot loader is required", paths.prootLoaderBinary.exists())
+        assertTrue("host graphics bridge must not ship", !paths.virglRendererBinary.exists())
     }
 
     @Test

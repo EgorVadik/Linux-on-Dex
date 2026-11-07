@@ -63,7 +63,9 @@ data class VmConfig(
      * Empty list means the configuration is startable.
      */
     fun validationProblems(deviceTotalRamMb: Int): List<String> = buildList {
-        if (deviceTotalRamMb > 0) {
+        // A container reserves no guest RAM, so the VM memory setting does
+        // not apply to it and must not block its start.
+        if (deviceTotalRamMb > 0 && !runsInProotContainer) {
             val safeCeiling = maxSafeGuestMemoryMb(deviceTotalRamMb)
             if (memoryMb > safeCeiling) {
                 add(
@@ -226,13 +228,10 @@ data class StorageConfig(
     val diskSizeGb: Int = 16,
     val diskInterface: DiskInterface = DiskInterface.VIRTIO_BLK,
     /**
-     * How hard the disk path is tuned; see [DiskPerformance]. Defaults to
-     * the fastest setting, because emulated storage is what makes a
-     * software VM feel slow and a phone VM is rebuilt far more easily
-     * than it is waited on. Users who keep irreplaceable work inside the
-     * guest can move it down a notch.
+     * Write-back caching honors the guest's flush requests so coding work
+     * is not treated as a disposable installation disk.
      */
-    val performance: DiskPerformance = DiskPerformance.MAXIMUM,
+    val performance: DiskPerformance = DiskPerformance.FAST,
 ) {
     init {
         require(diskSizeGb in MIN_DISK_GB..MAX_DISK_GB) {
@@ -270,17 +269,17 @@ enum class DiskPerformance(
     val usesDedicatedIoThread: Boolean,
 ) {
     MAXIMUM(
-        "Maximum speed (default)",
-        "Ignores flush requests — much faster for installs, updates and " +
-            "everyday use. Shut the VM down cleanly; a crash or battery " +
-            "pull can corrupt the disk.",
-        qemuCacheMode = "unsafe",
-        flushesToDisk = false,
+        // Retain this serialized enum value for old configs, but never
+        // revive unsafe caching when such a config is loaded.
+        "Legacy speed profile",
+        "Write-back caching that honors guest flush requests",
+        qemuCacheMode = "writeback",
+        flushesToDisk = true,
         usesDedicatedIoThread = true,
     ),
     FAST(
-        "Balanced",
-        "Write-back caching on its own I/O thread; safe on a clean shutdown",
+        "Balanced (default)",
+        "Write-back caching with guest flush requests honored",
         qemuCacheMode = "writeback",
         flushesToDisk = true,
         usesDedicatedIoThread = true,

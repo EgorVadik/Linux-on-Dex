@@ -91,6 +91,21 @@ class VmConfigTest {
     }
 
     @Test
+    fun `a container is not held to the VM memory ceiling`() {
+        val container = config(memoryMb = 7168).copy(
+            preparedImage = PreparedImageConfig(
+                displayName = "Devbox",
+                diskImagePath = "/data/devbox.rootfs.tar.gz",
+                format = PreparedImageFormat.PROOT_ROOTFS,
+            ),
+        )
+
+        val problems = container.validationProblems(deviceTotalRamMb = 8192)
+
+        assertTrue("expected no memory problem but got $problems", problems.none { it.contains("Memory") })
+    }
+
+    @Test
     fun `memory within the safe ceiling passes validation`() {
         val problems = config(memoryMb = 4096).validationProblems(deviceTotalRamMb = 8192)
 

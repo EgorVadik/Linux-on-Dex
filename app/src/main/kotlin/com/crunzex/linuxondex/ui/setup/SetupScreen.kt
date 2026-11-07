@@ -887,7 +887,7 @@ private fun StorageGroup(
             }
             RowDivider()
             SectionCaption("Disk performance")
-            DiskPerformance.entries.forEach { option ->
+            DiskPerformance.entries.filter { it != DiskPerformance.MAXIMUM }.forEach { option ->
                 ChoiceRow(
                     title = option.displayName,
                     subtitle = option.description,
@@ -954,7 +954,7 @@ private fun DisplayGroup(
         RowDivider()
         ListRow(
             title = "VNC display number",
-            subtitle = "Guest screen served on 127.0.0.1:${config.vncPort}",
+            subtitle = "Guest screen uses an app-private socket",
             value = config.display.vncDisplayNumber.toString(),
         )
     }
@@ -1056,7 +1056,7 @@ private fun EngineGroup(
                     enabled = enabled,
                 )
             }
-            EngineOverride.entries.forEach { option ->
+            EngineOverride.entries.filter { it != EngineOverride.FORCE_PROOT }.forEach { option ->
                 RowDivider()
                 ChoiceRow(
                     title = option.displayName,

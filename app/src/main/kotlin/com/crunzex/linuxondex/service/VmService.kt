@@ -5,8 +5,10 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.ServiceInfo
 import android.os.IBinder
 import android.os.PowerManager
@@ -26,8 +28,14 @@ import com.crunzex.linuxondex.vm.VmState
 
 /**
  * Foreground service that owns the running VM: keeps the process alive in
- * the background, holds a partial wake lock (a paused CPU would freeze the
- * guest kernel), and reflects VM state in its notification.
+ * the background, holds a partial wake lock while the guest is doing
+ * something, and reflects VM state in its notification.
+ *
+ * The wake lock used to be held for the whole session, which kept the phone
+ * from ever sleeping while Linux was merely open. Now it follows activity:
+ * held while the screen is on and for [IDLE_RELEASE_MILLIS] after the guest
+ * last used CPU or network, then released so an idle phone can suspend. A
+ * long agent task or build keeps it held because it keeps being active.
  */
 class VmService : Service() {
 
@@ -36,6 +44,19 @@ class VmService : Service() {
     private var stateObserverStarted = false
     private var recoveryJob: Job? = null
     private val prootRecoveryPolicy = ProotRecoveryPolicy()
+    private val activityMonitor = GuestActivityMonitor()
+    private var activityJob: Job? = null
+    @Volatile private var lastActivityAtMillis = 0L
+    private var screenReceiverRegistered = false
+    private val screenReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            if (intent.action == Intent.ACTION_SCREEN_ON) {
+                // The user is back: whatever they start next must not stall.
+                lastActivityAtMillis = android.os.SystemClock.elapsedRealtime()
+                acquireWakeLock()
+            }
+        }
+    }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -55,7 +76,9 @@ class VmService : Service() {
 
     private fun handleStart() {
         promoteToForeground(getString(R.string.notification_vm_running))
+        lastActivityAtMillis = android.os.SystemClock.elapsedRealtime()
         acquireWakeLock()
+        startActivityAwareWakeLock()
         observeVmStateOnce()
 
         val controller = (application as LinuxOnDexApp).container.vmController
@@ -154,7 +177,49 @@ class VmService : Service() {
         }
     }
 
+    /** Re-evaluates the wake lock every [ACTIVITY_SAMPLE_MILLIS]. */
+    private fun startActivityAwareWakeLock() {
+        if (!screenReceiverRegistered) {
+            registerReceiver(screenReceiver, IntentFilter(Intent.ACTION_SCREEN_ON))
+            screenReceiverRegistered = true
+        }
+        if (activityJob?.isActive == true) return
+        activityMonitor.sample() // baseline
+        activityJob = serviceScope.launch {
+            while (true) {
+                delay(ACTIVITY_SAMPLE_MILLIS)
+                val now = android.os.SystemClock.elapsedRealtime()
+                val sample = runCatching { activityMonitor.sample() }.getOrNull()
+                if (sample == null ||
+                    sample.isActive(CPU_ACTIVE_TICKS_PER_SAMPLE, NETWORK_ACTIVE_BYTES_PER_SAMPLE)
+                ) {
+                    lastActivityAtMillis = now
+                }
+                val interactive = getSystemService(PowerManager::class.java).isInteractive
+                if (interactive || now - lastActivityAtMillis < IDLE_RELEASE_MILLIS) {
+                    if (wakeLock?.isHeld != true) {
+                        AppLog.info(SCOPE, "guest active: holding wake lock")
+                    }
+                    acquireWakeLock()
+                } else if (wakeLock?.isHeld == true) {
+                    AppLog.info(SCOPE, "guest idle with screen off: releasing wake lock")
+                    releaseWakeLock()
+                }
+            }
+        }
+    }
+
+    private fun stopActivityAwareWakeLock() {
+        activityJob?.cancel()
+        activityJob = null
+        if (screenReceiverRegistered) {
+            runCatching { unregisterReceiver(screenReceiver) }
+            screenReceiverRegistered = false
+        }
+    }
+
     private fun windDown() {
+        stopActivityAwareWakeLock()
         releaseWakeLock()
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
@@ -223,6 +288,7 @@ class VmService : Service() {
     }
 
     override fun onDestroy() {
+        stopActivityAwareWakeLock()
         releaseWakeLock()
         serviceScope.cancel()
         super.onDestroy()
@@ -233,6 +299,13 @@ class VmService : Service() {
         private const val CHANNEL_ID = "vm-runtime"
         private const val NOTIFICATION_ID = 1001
         private const val WAKE_LOCK_TAG = "LinuxOnDex:vm"
+        private const val ACTIVITY_SAMPLE_MILLIS = 60_000L
+        /** Screen off and quiet this long → let the phone sleep. */
+        private const val IDLE_RELEASE_MILLIS = 10 * 60_000L
+        /** 1% of one core over a sample (USER_HZ is 100 on Android). */
+        private const val CPU_ACTIVE_TICKS_PER_SAMPLE = 60L
+        /** Enough to tell a streaming API response from keep-alives. */
+        private const val NETWORK_ACTIVE_BYTES_PER_SAMPLE = 16L * 1024
         private const val ACTION_START_VM = "com.crunzex.linuxondex.action.START_VM"
         private const val ACTION_STOP_VM = "com.crunzex.linuxondex.action.STOP_VM"
         private const val EXTRA_STOP_ORIGIN = "stop_origin"
